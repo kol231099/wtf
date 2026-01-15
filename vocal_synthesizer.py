@@ -82,129 +82,153 @@ class VocalSynthesizer:
             )
             result['aligned_lyrics'] = optimized_lyrics
 
-            # Step 7: 生成語音片段並合成
-            result['steps'].append('正在生成歌聲...')
-            print("Step 7: 生成歌聲")
+            # Step 7: 提取音符級別特徵
+            result['steps'].append('正在分析原旋律的音符細節...')
+            print("Step 7: 提取音符級別特徵")
+
+            # 提取原旋律的每個音符信息
+            notes = self.audio_processor.extract_note_level_features(melody_path)
+            print(f"  檢測到 {len(notes)} 個音符")
+
+            # Step 8: 歌詞與音符對齊
+            result['steps'].append('正在將歌詞對齊到音符...')
+            print("Step 8: 歌詞與音符對齊")
+
+            aligned = self.audio_processor.align_lyrics_to_notes(new_lyrics, notes)
+            print(f"  對齊了 {len(aligned)} 個字")
+
+            # 打印對齊信息（用於調試）
+            for i, item in enumerate(aligned[:5]):  # 只打印前5個
+                print(f"  [{i}] '{item['char']}' -> {item['note']['pitch']:.1f}Hz, {item['note']['duration']:.2f}s")
+
+            # Step 9: 逐字生成並調整 vocal
+            result['steps'].append('正在逐字生成歌聲並匹配原唱法...')
+            print("Step 9: 逐字生成歌聲")
+
             vocal_segments = []
+            tts_sr = 22050
 
-            # 使用 OpenAI TTS 生成整段語音
-            # 計算建議的語速（調整為更慢，更有歌唱感）
-            original_duration = timing_info['total_duration']
-            estimated_speaking_duration = len(new_lyrics) * 0.3  # 粗略估計
-            calculated_speed = estimated_speaking_duration / original_duration
+            for i, item in enumerate(aligned):
+                char = item['char']
+                note = item['note']
 
-            # 降低速度以獲得更多音樂表現空間（使用配置的係數）
-            # 更慢的語速給後續的音高調整和顫音處理更多空間
-            speed = min(Config.TTS_SPEED_MAX, max(Config.TTS_SPEED_MIN,
-                                                   calculated_speed * Config.TTS_SPEED_FACTOR))
+                print(f"  處理 [{i+1}/{len(aligned)}]: '{char}' (目標: {note['pitch']:.1f}Hz, {note['duration']:.2f}s)")
 
-            print(f"  原始歌詞長度: {len(new_lyrics)} 字")
-            print(f"  目標時長: {original_duration:.2f} 秒")
-            print(f"  TTS 速度: {speed:.2f}x")
+                # 9.1: 為單個字生成 TTS
+                char_tts_path = os.path.join(output_dir, f'char_{i}_{char}.wav')
 
-            tts_output = os.path.join(output_dir, 'tts_vocal.wav')
-            self.ai_service.generate_speech_with_timing(
-                new_lyrics,
-                tts_output,
-                voice=Config.TTS_VOICE,  # 從配置讀取聲音
-                speed=speed
-            )
-
-            # Step 8: 時間拉伸以匹配旋律長度
-            result['steps'].append('正在調整歌聲時長以匹配旋律...')
-            print("Step 8: 時間拉伸")
-            tts_audio, tts_sr = self.audio_processor.load_audio(tts_output)
-            melody_audio = melody_features['audio']
-
-            # 計算拉伸因子
-            tts_duration = librosa.get_duration(y=tts_audio, sr=tts_sr)
-            melody_duration = melody_features['duration']
-            stretch_factor = tts_duration / melody_duration
-
-            # 拉伸 TTS 音頻以匹配旋律長度
-            stretched_vocal = self.audio_processor.time_stretch_audio(tts_audio, stretch_factor)
-
-            # 保存基礎拉伸後的人聲（用於調試）
-            stretched_vocal_path = os.path.join(output_dir, 'stretched_vocal_base.wav')
-            self.audio_processor.save_audio(stretched_vocal, stretched_vocal_path)
-            result['files']['stretched_vocal_base'] = stretched_vocal_path
-
-            # Step 8.5: 應用音樂表現力處理
-            result['steps'].append('正在添加歌唱表現力（音高調整、顫音、動態）...')
-            print("Step 8.5: 音樂表現力處理")
-
-            # 8.5.1: 提取旋律音高信息
-            melody_f0, voiced_flag, voiced_probs = librosa.pyin(
-                melody_audio,
-                fmin=librosa.note_to_hz('C2'),
-                fmax=librosa.note_to_hz('C7'),
-                sr=tts_sr
-            )
-            # 填充未檢測到的音高值
-            melody_f0_filled = np.copy(melody_f0)
-            nans = np.isnan(melody_f0_filled)
-            if nans.any():
-                # 使用線性插值填充
-                x = np.arange(len(melody_f0_filled))
-                melody_f0_filled[nans] = np.interp(
-                    x[nans], x[~nans], melody_f0_filled[~nans]
+                # 使用正常速度生成（後續會拉伸）
+                self.ai_service.generate_speech_with_timing(
+                    char,
+                    char_tts_path,
+                    voice=Config.TTS_VOICE,  # 使用配置的聲音（shimmer=女聲柔和）
+                    speed=1.0  # 正常速度
                 )
 
-            # 8.5.2: 動態音高輪廓匹配
-            if Config.PITCH_CONTOUR_ENABLED:
-                try:
-                    pitched_vocal = self.audio_processor.apply_dynamic_pitch_contour(
-                        stretched_vocal,
-                        tts_sr,
-                        melody_f0_filled
+                # 9.2: 加載生成的音頻
+                char_audio, char_sr = self.audio_processor.load_audio(char_tts_path)
+
+                # 9.3: 調整時長以匹配音符時長
+                char_duration = librosa.get_duration(y=char_audio, sr=char_sr)
+                target_duration = note['duration']
+
+                if char_duration > 0:
+                    stretch_factor = char_duration / target_duration
+                    char_audio = self.audio_processor.time_stretch_audio(char_audio, stretch_factor)
+
+                # 9.4: 調整音高以匹配音符音高
+                # 提取原始TTS的音高
+                char_f0 = librosa.yin(char_audio, fmin=80, fmax=400, sr=char_sr)
+                char_f0_median = np.median(char_f0[~np.isnan(char_f0)]) if np.any(~np.isnan(char_f0)) else 200
+
+                # 計算需要調整的半音數
+                if char_f0_median > 0 and note['pitch'] > 0:
+                    pitch_ratio = note['pitch'] / char_f0_median
+                    n_steps = 12 * np.log2(pitch_ratio)
+                    n_steps = np.clip(n_steps, -12, 12)  # 限制範圍
+
+                    # 應用音高調整
+                    char_audio = self.audio_processor.pitch_shift_audio(
+                        char_audio, char_sr, n_steps
                     )
-                    print("  ✓ 音高輪廓調整完成")
-                except Exception as e:
-                    print(f"  ⚠ 音高調整失敗，使用原始音頻: {e}")
-                    pitched_vocal = stretched_vocal
-            else:
-                print("  ⊘ 音高輪廓調整已禁用")
-                pitched_vocal = stretched_vocal
 
-            # 8.5.3: 添加顫音效果
-            try:
-                vibrato_vocal = self.audio_processor.apply_vibrato(
-                    pitched_vocal,
-                    tts_sr,
-                    rate=Config.VIBRATO_RATE,   # 從配置讀取顫音頻率
-                    depth=Config.VIBRATO_DEPTH  # 從配置讀取顫音深度
-                )
-                print("  ✓ 顫音效果添加完成")
-            except Exception as e:
-                print(f"  ⚠ 顫音添加失敗，使用原始音頻: {e}")
-                vibrato_vocal = pitched_vocal
+                # 9.5: 如果音符有音高變化（滑音），模擬它
+                if note.get('pitch_variation', 0) > 2:  # 顯著的音高變化
+                    # 添加適度顫音
+                    try:
+                        char_audio = self.audio_processor.apply_vibrato(
+                            char_audio, char_sr,
+                            rate=5.5,
+                            depth=min(0.5, note['pitch_variation'] / 10)
+                        )
+                    except:
+                        pass  # 如果失敗就跳過
 
-            # 8.5.4: 應用動態音量包絡
-            if Config.DYNAMIC_ENVELOPE_ENABLED:
-                try:
-                    expressive_vocal = self.audio_processor.apply_dynamic_envelope(
-                        vibrato_vocal,
-                        melody_features['rms']
-                    )
-                    print("  ✓ 動態音量調整完成")
-                except Exception as e:
-                    print(f"  ⚠ 動態包絡應用失敗，使用原始音頻: {e}")
-                    expressive_vocal = vibrato_vocal
-            else:
-                print("  ⊘ 動態包絡調整已禁用")
-                expressive_vocal = vibrato_vocal
+                # 9.6: 調整音量以匹配音符強度
+                target_rms = note['loudness']
+                char_rms = np.sqrt(np.mean(char_audio**2))
+                if char_rms > 0:
+                    char_audio = char_audio * (target_rms / char_rms)
 
-            # 保存最終表現力處理後的人聲
+                # 9.7: 確保音頻長度正確
+                target_samples = int(target_duration * char_sr)
+                if len(char_audio) > target_samples:
+                    char_audio = char_audio[:target_samples]
+                elif len(char_audio) < target_samples:
+                    char_audio = np.pad(char_audio, (0, target_samples - len(char_audio)))
+
+                vocal_segments.append(char_audio)
+
+                # 清理臨時文件
+                if os.path.exists(char_tts_path):
+                    os.remove(char_tts_path)
+
+            # Step 10: 拼接所有字
+            result['steps'].append('正在拼接所有字形成完整歌聲...')
+            print("Step 10: 拼接vocal片段")
+
+            # 創建完整的時間軸
+            total_duration = melody_features['duration']
+            total_samples = int(total_duration * tts_sr)
+            final_vocal = np.zeros(total_samples)
+
+            # 將每個字放到對應的時間位置
+            for i, (item, segment) in enumerate(zip(aligned, vocal_segments)):
+                note = item['note']
+                start_sample = int(note['start'] * tts_sr)
+                end_sample = start_sample + len(segment)
+
+                # 確保不超出範圍
+                if end_sample > total_samples:
+                    segment = segment[:total_samples - start_sample]
+                    end_sample = total_samples
+
+                if start_sample < total_samples:
+                    # 添加淡入淡出以避免咔噠聲
+                    fade_len = min(100, len(segment) // 4)
+                    if fade_len > 0:
+                        fade_in = np.linspace(0, 1, fade_len)
+                        fade_out = np.linspace(1, 0, fade_len)
+                        segment[:fade_len] *= fade_in
+                        segment[-fade_len:] *= fade_out
+
+                    final_vocal[start_sample:end_sample] += segment
+
+            # 歸一化
+            max_val = np.max(np.abs(final_vocal))
+            if max_val > 0:
+                final_vocal = final_vocal / max_val * 0.9
+
+            stretched_vocal = final_vocal
+
+            # 保存逐字處理後的人聲
             stretched_vocal_path = os.path.join(output_dir, 'stretched_vocal.wav')
-            self.audio_processor.save_audio(expressive_vocal, stretched_vocal_path)
+            self.audio_processor.save_audio(stretched_vocal, stretched_vocal_path, sr=tts_sr)
             result['files']['stretched_vocal'] = stretched_vocal_path
 
-            # 使用表現力處理後的vocal進行後續混音
-            stretched_vocal = expressive_vocal
-
-            # Step 9: 混合旋律和人聲
+            # Step 11: 混合旋律和人聲
             result['steps'].append('正在混合旋律和人聲...')
-            print("Step 9: 混合音頻")
+            print("Step 11: 混合音頻")
             final_output = os.path.join(output_dir, 'final_output.wav')
             self.audio_processor.mix_audio(
                 melody_audio,

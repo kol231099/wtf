@@ -392,6 +392,176 @@ class AudioProcessor:
 
         return shaped_audio
 
+    def extract_note_level_features(self, audio_path):
+        """
+        提取音符級別的詳細特徵（用於逐字匹配）
+
+        Args:
+            audio_path: 音頻文件路徑
+
+        Returns:
+            notes: 音符列表，每個包含 {start, end, pitch, loudness}
+        """
+        y, sr = self.load_audio(audio_path)
+
+        # 使用更精確的音高檢測
+        f0, voiced_flag, voiced_probs = librosa.pyin(
+            y,
+            fmin=librosa.note_to_hz('C2'),
+            fmax=librosa.note_to_hz('C7'),
+            sr=sr,
+            frame_length=2048,
+            hop_length=256  # 更小的hop_length以獲得更高時間解析度
+        )
+
+        # 提取音量
+        rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=256)[0]
+
+        # 將幀轉換為時間
+        times = librosa.frames_to_time(np.arange(len(f0)), sr=sr, hop_length=256)
+
+        # 檢測音符邊界（音高或音量變化顯著的地方）
+        notes = []
+        current_note = None
+
+        for i in range(len(f0)):
+            # 跳過無音高的幀
+            if not voiced_flag[i] or np.isnan(f0[i]) or rms[i] < np.mean(rms) * 0.2:
+                # 如果之前有音符在進行中，結束它
+                if current_note is not None:
+                    current_note['end'] = times[i]
+                    current_note['duration'] = current_note['end'] - current_note['start']
+                    if current_note['duration'] > 0.05:  # 過濾掉太短的音符
+                        notes.append(current_note)
+                    current_note = None
+                continue
+
+            # 檢查是否需要開始新音符
+            should_start_new = False
+            if current_note is None:
+                should_start_new = True
+            else:
+                # 音高變化超過0.5個半音，視為新音符
+                pitch_diff = abs(12 * np.log2(f0[i] / current_note['pitch']))
+                if pitch_diff > 0.5:
+                    should_start_new = True
+
+            if should_start_new:
+                # 結束舊音符
+                if current_note is not None:
+                    current_note['end'] = times[i]
+                    current_note['duration'] = current_note['end'] - current_note['start']
+                    if current_note['duration'] > 0.05:
+                        notes.append(current_note)
+
+                # 開始新音符
+                current_note = {
+                    'start': times[i],
+                    'pitch': f0[i],
+                    'loudness': rms[i],
+                    'pitch_values': [f0[i]],
+                    'loudness_values': [rms[i]]
+                }
+            else:
+                # 累積當前音符的數據
+                current_note['pitch_values'].append(f0[i])
+                current_note['loudness_values'].append(rms[i])
+                # 更新平均值
+                current_note['pitch'] = np.median(current_note['pitch_values'])
+                current_note['loudness'] = np.mean(current_note['loudness_values'])
+
+        # 結束最後一個音符
+        if current_note is not None:
+            current_note['end'] = times[-1]
+            current_note['duration'] = current_note['end'] - current_note['start']
+            if current_note['duration'] > 0.05:
+                notes.append(current_note)
+
+        # 為每個音符計算額外特徵
+        for note in notes:
+            # 計算音高變化（滑音、顫音等）
+            if len(note['pitch_values']) > 1:
+                pitch_var = np.std(note['pitch_values'])
+                note['pitch_variation'] = pitch_var
+                # 檢測音高趨勢（上升/下降）
+                note['pitch_trend'] = np.polyfit(
+                    np.arange(len(note['pitch_values'])),
+                    note['pitch_values'],
+                    1
+                )[0]
+            else:
+                note['pitch_variation'] = 0
+                note['pitch_trend'] = 0
+
+            # 清理臨時數據
+            del note['pitch_values']
+            del note['loudness_values']
+
+        return notes
+
+    def align_lyrics_to_notes(self, lyrics, notes):
+        """
+        將歌詞對齊到音符
+
+        Args:
+            lyrics: 歌詞字符串
+            notes: 音符列表
+
+        Returns:
+            aligned: 對齊後的列表，每個元素包含 {char, note}
+        """
+        # 移除空白字符，保留所有可見字符
+        chars = [c for c in lyrics if not c.isspace()]
+
+        if len(chars) == 0 or len(notes) == 0:
+            return []
+
+        # 簡單策略：均勻分配字符到音符
+        # 更複雜的策略可以使用時長信息
+        aligned = []
+
+        if len(chars) <= len(notes):
+            # 字少音符多：每個字對應一個或多個音符
+            chars_per_note = len(notes) / len(chars)
+            for i, char in enumerate(chars):
+                # 為這個字分配音符
+                start_note_idx = int(i * chars_per_note)
+                end_note_idx = int((i + 1) * chars_per_note)
+                note_group = notes[start_note_idx:end_note_idx]
+
+                if note_group:
+                    # 合併這組音符的特徵
+                    merged_note = {
+                        'start': note_group[0]['start'],
+                        'end': note_group[-1]['end'],
+                        'duration': note_group[-1]['end'] - note_group[0]['start'],
+                        'pitch': np.mean([n['pitch'] for n in note_group]),
+                        'loudness': np.mean([n['loudness'] for n in note_group]),
+                        'pitch_variation': np.mean([n.get('pitch_variation', 0) for n in note_group]),
+                        'pitch_trend': np.mean([n.get('pitch_trend', 0) for n in note_group])
+                    }
+                    aligned.append({'char': char, 'note': merged_note})
+        else:
+            # 字多音符少：多個字共享一個音符
+            notes_per_char = len(chars) / len(notes)
+            for i, note in enumerate(notes):
+                # 為這個音符分配字符
+                start_char_idx = int(i * notes_per_char)
+                end_char_idx = int((i + 1) * notes_per_char)
+                char_group = chars[start_char_idx:end_char_idx]
+
+                # 將音符時長均分給這些字
+                if char_group:
+                    duration_per_char = note['duration'] / len(char_group)
+                    for j, char in enumerate(char_group):
+                        char_note = note.copy()
+                        char_note['start'] = note['start'] + j * duration_per_char
+                        char_note['end'] = note['start'] + (j + 1) * duration_per_char
+                        char_note['duration'] = duration_per_char
+                        aligned.append({'char': char, 'note': char_note})
+
+        return aligned
+
     def save_audio(self, audio, output_path, sr=None):
         """
         保存音頻文件
