@@ -229,17 +229,22 @@ class VocalSynthesizer:
             # Step 11: 混合旋律和人聲
             result['steps'].append('正在混合旋律和人聲...')
             print("Step 11: 混合音頻")
+
+            # 從 melody_features 中獲取旋律音頻
+            melody_audio = melody_features['audio']
+
             final_output = os.path.join(output_dir, 'final_output.wav')
             self.audio_processor.mix_audio(
                 melody_audio,
                 stretched_vocal,
                 final_output,
-                melody_volume=0.5,
-                vocal_volume=0.8
+                melody_volume=Config.DEFAULT_MELODY_VOLUME,
+                vocal_volume=Config.DEFAULT_VOCAL_VOLUME
             )
 
             result['files']['final_output'] = final_output
-            result['files']['tts_vocal'] = tts_output
+            # 逐字生成的方式不再有單一的 tts_vocal 文件
+            # result['files']['tts_vocal'] = stretched_vocal_path
             result['success'] = True
             result['steps'].append('合成完成!')
 
