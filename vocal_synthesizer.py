@@ -4,6 +4,7 @@ import numpy as np
 import soundfile as sf
 from audio_processor import AudioProcessor
 from ai_service import AIService
+from config import Config
 
 
 class VocalSynthesizer:
@@ -87,16 +88,25 @@ class VocalSynthesizer:
             vocal_segments = []
 
             # 使用 OpenAI TTS 生成整段語音
-            # 計算建議的語速
+            # 計算建議的語速（調整為更慢，更有歌唱感）
             original_duration = timing_info['total_duration']
             estimated_speaking_duration = len(new_lyrics) * 0.3  # 粗略估計
-            speed = min(4.0, max(0.25, estimated_speaking_duration / original_duration))
+            calculated_speed = estimated_speaking_duration / original_duration
+
+            # 降低速度以獲得更多音樂表現空間（使用配置的係數）
+            # 更慢的語速給後續的音高調整和顫音處理更多空間
+            speed = min(Config.TTS_SPEED_MAX, max(Config.TTS_SPEED_MIN,
+                                                   calculated_speed * Config.TTS_SPEED_FACTOR))
+
+            print(f"  原始歌詞長度: {len(new_lyrics)} 字")
+            print(f"  目標時長: {original_duration:.2f} 秒")
+            print(f"  TTS 速度: {speed:.2f}x")
 
             tts_output = os.path.join(output_dir, 'tts_vocal.wav')
             self.ai_service.generate_speech_with_timing(
                 new_lyrics,
                 tts_output,
-                voice='nova',  # 可調整不同的聲音
+                voice=Config.TTS_VOICE,  # 從配置讀取聲音
                 speed=speed
             )
 
@@ -114,10 +124,83 @@ class VocalSynthesizer:
             # 拉伸 TTS 音頻以匹配旋律長度
             stretched_vocal = self.audio_processor.time_stretch_audio(tts_audio, stretch_factor)
 
-            # 保存拉伸後的人聲
-            stretched_vocal_path = os.path.join(output_dir, 'stretched_vocal.wav')
+            # 保存基礎拉伸後的人聲（用於調試）
+            stretched_vocal_path = os.path.join(output_dir, 'stretched_vocal_base.wav')
             self.audio_processor.save_audio(stretched_vocal, stretched_vocal_path)
+            result['files']['stretched_vocal_base'] = stretched_vocal_path
+
+            # Step 8.5: 應用音樂表現力處理
+            result['steps'].append('正在添加歌唱表現力（音高調整、顫音、動態）...')
+            print("Step 8.5: 音樂表現力處理")
+
+            # 8.5.1: 提取旋律音高信息
+            melody_f0, voiced_flag, voiced_probs = librosa.pyin(
+                melody_audio,
+                fmin=librosa.note_to_hz('C2'),
+                fmax=librosa.note_to_hz('C7'),
+                sr=tts_sr
+            )
+            # 填充未檢測到的音高值
+            melody_f0_filled = np.copy(melody_f0)
+            nans = np.isnan(melody_f0_filled)
+            if nans.any():
+                # 使用線性插值填充
+                x = np.arange(len(melody_f0_filled))
+                melody_f0_filled[nans] = np.interp(
+                    x[nans], x[~nans], melody_f0_filled[~nans]
+                )
+
+            # 8.5.2: 動態音高輪廓匹配
+            if Config.PITCH_CONTOUR_ENABLED:
+                try:
+                    pitched_vocal = self.audio_processor.apply_dynamic_pitch_contour(
+                        stretched_vocal,
+                        tts_sr,
+                        melody_f0_filled
+                    )
+                    print("  ✓ 音高輪廓調整完成")
+                except Exception as e:
+                    print(f"  ⚠ 音高調整失敗，使用原始音頻: {e}")
+                    pitched_vocal = stretched_vocal
+            else:
+                print("  ⊘ 音高輪廓調整已禁用")
+                pitched_vocal = stretched_vocal
+
+            # 8.5.3: 添加顫音效果
+            try:
+                vibrato_vocal = self.audio_processor.apply_vibrato(
+                    pitched_vocal,
+                    tts_sr,
+                    rate=Config.VIBRATO_RATE,   # 從配置讀取顫音頻率
+                    depth=Config.VIBRATO_DEPTH  # 從配置讀取顫音深度
+                )
+                print("  ✓ 顫音效果添加完成")
+            except Exception as e:
+                print(f"  ⚠ 顫音添加失敗，使用原始音頻: {e}")
+                vibrato_vocal = pitched_vocal
+
+            # 8.5.4: 應用動態音量包絡
+            if Config.DYNAMIC_ENVELOPE_ENABLED:
+                try:
+                    expressive_vocal = self.audio_processor.apply_dynamic_envelope(
+                        vibrato_vocal,
+                        melody_features['rms']
+                    )
+                    print("  ✓ 動態音量調整完成")
+                except Exception as e:
+                    print(f"  ⚠ 動態包絡應用失敗，使用原始音頻: {e}")
+                    expressive_vocal = vibrato_vocal
+            else:
+                print("  ⊘ 動態包絡調整已禁用")
+                expressive_vocal = vibrato_vocal
+
+            # 保存最終表現力處理後的人聲
+            stretched_vocal_path = os.path.join(output_dir, 'stretched_vocal.wav')
+            self.audio_processor.save_audio(expressive_vocal, stretched_vocal_path)
             result['files']['stretched_vocal'] = stretched_vocal_path
+
+            # 使用表現力處理後的vocal進行後續混音
+            stretched_vocal = expressive_vocal
 
             # Step 9: 混合旋律和人聲
             result['steps'].append('正在混合旋律和人聲...')

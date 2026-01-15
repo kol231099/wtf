@@ -4,6 +4,7 @@ import soundfile as sf
 from scipy import signal
 from pydub import AudioSegment
 import os
+from config import Config
 
 
 class AudioProcessor:
@@ -206,6 +207,190 @@ class AudioProcessor:
             shifted_audio: 改變音高後的音頻
         """
         return librosa.effects.pitch_shift(audio, sr=sr, n_steps=n_steps)
+
+    def apply_vibrato(self, audio, sr, rate=5.5, depth=0.5):
+        """
+        為音頻添加顫音效果，讓聲音更像歌唱
+
+        Args:
+            audio: 音頻數據
+            sr: 採樣率
+            rate: 顫音頻率 (Hz)，通常在 4-7 Hz 之間
+            depth: 顫音深度（半音），通常在 0.3-1.0 之間
+
+        Returns:
+            vibrato_audio: 添加顫音後的音頻
+        """
+        # 創建顫音調制信號（正弦波）
+        t = np.arange(len(audio)) / sr
+        vibrato_lfo = depth * np.sin(2 * np.pi * rate * t)
+
+        # 使用相位累積實現音高調制
+        # 將顫音轉換為瞬時頻率調制
+        phase_acc = np.cumsum(2 ** (vibrato_lfo / 12))
+
+        # 使用線性插值重新採樣音頻
+        from scipy.interpolate import interp1d
+        original_indices = np.arange(len(audio))
+        new_indices = phase_acc * len(audio) / phase_acc[-1]
+
+        # 確保索引在有效範圍內
+        new_indices = np.clip(new_indices, 0, len(audio) - 1)
+
+        # 插值生成顫音
+        interp_func = interp1d(original_indices, audio, kind='linear',
+                              bounds_error=False, fill_value=0)
+        vibrato_audio = interp_func(new_indices)
+
+        return vibrato_audio
+
+    def apply_dynamic_pitch_contour(self, vocal_audio, sr, melody_pitches, hop_length=512):
+        """
+        根據旋律的音高輪廓動態調整人聲音高
+
+        Args:
+            vocal_audio: 人聲音頻
+            sr: 採樣率
+            melody_pitches: 旋律音高序列（Hz）
+            hop_length: 幀跳躍長度
+
+        Returns:
+            adjusted_audio: 調整後的音頻
+        """
+        # 使用短時傅里葉變換 (STFT) 進行音高調制
+        D = librosa.stft(vocal_audio, hop_length=hop_length)
+        magnitude = np.abs(D)
+        phase = np.angle(D)
+
+        # 提取人聲的音高軌跡
+        vocal_f0 = librosa.yin(vocal_audio, fmin=80, fmax=400, sr=sr, hop_length=hop_length)
+
+        # 確保旋律音高和人聲幀數匹配
+        if len(melody_pitches) != len(vocal_f0):
+            # 重新採樣旋律音高以匹配人聲幀數
+            from scipy.interpolate import interp1d
+            original_indices = np.linspace(0, 1, len(melody_pitches))
+            new_indices = np.linspace(0, 1, len(vocal_f0))
+            interp_func = interp1d(original_indices, melody_pitches,
+                                  kind='linear', fill_value='extrapolate')
+            melody_pitches_resampled = interp_func(new_indices)
+        else:
+            melody_pitches_resampled = melody_pitches
+
+        # 計算每幀的音高調整比例
+        pitch_shifts = []
+        for i in range(len(vocal_f0)):
+            if vocal_f0[i] > 0 and melody_pitches_resampled[i] > 0:
+                # 計算需要調整的半音數
+                ratio = melody_pitches_resampled[i] / vocal_f0[i]
+                n_steps = 12 * np.log2(ratio)
+                # 限制調整範圍，避免過度調整
+                n_steps = np.clip(n_steps, -12, 12)
+                pitch_shifts.append(n_steps)
+            else:
+                pitch_shifts.append(0)
+
+        pitch_shifts = np.array(pitch_shifts)
+
+        # 平滑音高軌跡，避免突兀的跳躍
+        from scipy.ndimage import gaussian_filter1d
+        pitch_shifts_smooth = gaussian_filter1d(pitch_shifts, sigma=2)
+
+        # 應用分段音高調整
+        # 由於librosa不支持時變音高調整，我們使用pyrubberband或分段處理
+        # 這裡使用簡化方法：分成多個片段，每個片段單獨調整
+        n_segments = min(Config.PITCH_CONTOUR_SEGMENTS, len(pitch_shifts_smooth))
+        segment_length = len(vocal_audio) // n_segments
+        adjusted_segments = []
+
+        for i in range(n_segments):
+            start_sample = i * segment_length
+            end_sample = (i + 1) * segment_length if i < n_segments - 1 else len(vocal_audio)
+            segment = vocal_audio[start_sample:end_sample]
+
+            # 計算該片段的平均音高調整
+            start_frame = i * len(pitch_shifts_smooth) // n_segments
+            end_frame = (i + 1) * len(pitch_shifts_smooth) // n_segments
+            avg_shift = np.mean(pitch_shifts_smooth[start_frame:end_frame])
+
+            # 調整該片段的音高
+            if abs(avg_shift) > 0.1:  # 只有顯著變化才調整
+                adjusted_segment = librosa.effects.pitch_shift(segment, sr=sr, n_steps=avg_shift)
+            else:
+                adjusted_segment = segment
+
+            adjusted_segments.append(adjusted_segment)
+
+        # 組合所有片段
+        adjusted_audio = np.concatenate(adjusted_segments)
+
+        # 確保長度一致
+        if len(adjusted_audio) > len(vocal_audio):
+            adjusted_audio = adjusted_audio[:len(vocal_audio)]
+        elif len(adjusted_audio) < len(vocal_audio):
+            adjusted_audio = np.pad(adjusted_audio, (0, len(vocal_audio) - len(adjusted_audio)))
+
+        return adjusted_audio
+
+    def apply_dynamic_envelope(self, vocal_audio, melody_rms, smoothing=5):
+        """
+        根據旋律的音量變化調整人聲的動態包絡
+
+        Args:
+            vocal_audio: 人聲音頻
+            melody_rms: 旋律的 RMS 能量
+            smoothing: 平滑窗口大小
+
+        Returns:
+            shaped_audio: 應用動態包絡後的音頻
+        """
+        # 計算人聲的 RMS
+        vocal_rms = librosa.feature.rms(y=vocal_audio, frame_length=2048, hop_length=512)[0]
+
+        # 將旋律 RMS 重採樣以匹配人聲 RMS 的長度
+        if len(melody_rms) != len(vocal_rms):
+            from scipy.interpolate import interp1d
+            original_indices = np.linspace(0, 1, len(melody_rms))
+            new_indices = np.linspace(0, 1, len(vocal_rms))
+            interp_func = interp1d(original_indices, melody_rms,
+                                  kind='cubic', fill_value='extrapolate')
+            melody_rms_resampled = interp_func(new_indices)
+        else:
+            melody_rms_resampled = melody_rms
+
+        # 歸一化
+        melody_rms_norm = melody_rms_resampled / (np.max(melody_rms_resampled) + 1e-8)
+        vocal_rms_norm = vocal_rms / (np.max(vocal_rms) + 1e-8)
+
+        # 計算增益調整
+        # 使用旋律的動態作為目標，但保留一些人聲的自然動態
+        target_rms = (Config.ENVELOPE_MELODY_WEIGHT * melody_rms_norm +
+                     Config.ENVELOPE_VOCAL_WEIGHT * vocal_rms_norm)
+        gain_envelope = target_rms / (vocal_rms_norm + 1e-8)
+
+        # 限制增益範圍，避免過度放大或縮小
+        gain_envelope = np.clip(gain_envelope, 0.3, 3.0)
+
+        # 平滑增益曲線
+        from scipy.ndimage import uniform_filter1d
+        gain_envelope_smooth = uniform_filter1d(gain_envelope, size=smoothing)
+
+        # 將幀級增益擴展到樣本級
+        hop_length = 512
+        gain_per_sample = np.repeat(gain_envelope_smooth, hop_length)
+
+        # 調整長度以匹配音頻
+        if len(gain_per_sample) > len(vocal_audio):
+            gain_per_sample = gain_per_sample[:len(vocal_audio)]
+        elif len(gain_per_sample) < len(vocal_audio):
+            gain_per_sample = np.pad(gain_per_sample,
+                                    (0, len(vocal_audio) - len(gain_per_sample)),
+                                    mode='edge')
+
+        # 應用增益包絡
+        shaped_audio = vocal_audio * gain_per_sample
+
+        return shaped_audio
 
     def save_audio(self, audio, output_path, sr=None):
         """
