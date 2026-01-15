@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 歌詞轉換與旋律對齊系統</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .upload-section {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .upload-section h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            margin-bottom: 15px;
+        }
+
+        .file-input-wrapper input[type="file"] {
+            display: none;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 15px 20px;
+            background: white;
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .file-input-label:hover {
+            background: #f0f4ff;
+            border-color: #764ba2;
+        }
+
+        .file-input-label.has-file {
+            border-color: #28a745;
+            background: #d4edda;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            padding: 15px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-top: 20px;
+        }
+
+        .submit-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .submit-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .progress-section {
+            display: none;
+            background: #e8f4f8;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .progress-step {
+            padding: 8px 0;
+            color: #555;
+        }
+
+        .progress-step.active {
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .loading-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .result-section {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .result-section.active {
+            display: block;
+        }
+
+        .audio-player {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .audio-player h4 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        audio {
+            width: 100%;
+        }
+
+        .download-btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            transition: background 0.3s;
+        }
+
+        .download-btn:hover {
+            background: #218838;
+        }
+
+        .analysis-section {
+            background: #fff3cd;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+
+        .analysis-section h4 {
+            color: #856404;
+            margin-bottom: 10px;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            display: none;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        .info-box {
+            background: #d1ecf1;
+            border-left: 4px solid #0c5460;
+            color: #0c5460;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>AI 歌詞轉換與旋律對齊系統</h1>
+            <p>上傳您的音樂檔案，讓 AI 幫您將新歌詞匹配到原旋律</p>
+        </div>
+
+        <div class="content">
+            <div class="info-box">
+                <strong>使用說明：</strong><br>
+                1. 上傳原始歌曲（包含歌詞和旋律的 WAV 檔案）<br>
+                2. 上傳純旋律檔案（僅旋律的 WAV 檔案）<br>
+                3. 輸入新的歌詞文本<br>
+                4. 點擊「開始合成」按鈕，等待 AI 處理
+            </div>
+
+            <form id="synthesisForm">
+                <div class="upload-section">
+                    <h3>1. 上傳原始歌曲（歌詞+旋律）</h3>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="originalAudio" name="original_audio" accept=".wav,.mp3,.flac,.m4a" required>
+                        <label for="originalAudio" class="file-input-label" id="originalLabel">
+                            點擊選擇文件或拖放到此處
+                        </label>
+                    </div>
+                </div>
+
+                <div class="upload-section">
+                    <h3>2. 上傳純旋律檔案</h3>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="melodyAudio" name="melody_audio" accept=".wav,.mp3,.flac,.m4a" required>
+                        <label for="melodyAudio" class="file-input-label" id="melodyLabel">
+                            點擊選擇文件或拖放到此處
+                        </label>
+                    </div>
+                </div>
+
+                <div class="upload-section">
+                    <h3>3. 輸入新歌詞</h3>
+                    <textarea id="newLyrics" name="new_lyrics" placeholder="請在此輸入您的新歌詞..." required></textarea>
+                </div>
+
+                <button type="submit" class="submit-btn" id="submitBtn">開始合成</button>
+            </form>
+
+            <div class="progress-section" id="progressSection">
+                <h3>處理進度</h3>
+                <div class="loading-spinner"></div>
+                <div id="progressSteps"></div>
+            </div>
+
+            <div class="error-message" id="errorMessage"></div>
+
+            <div class="result-section" id="resultSection">
+                <h3>合成結果</h3>
+
+                <div class="audio-player">
+                    <h4>最終輸出（旋律 + 新歌詞）</h4>
+                    <audio id="finalAudio" controls></audio>
+                    <a href="#" class="download-btn" id="downloadFinal">下載最終版本</a>
+                </div>
+
+                <div class="audio-player">
+                    <h4>純人聲（調整後）</h4>
+                    <audio id="vocalAudio" controls></audio>
+                    <a href="#" class="download-btn" id="downloadVocal">下載人聲</a>
+                </div>
+
+                <div class="analysis-section" id="analysisSection">
+                    <h4>AI 分析結果</h4>
+                    <div id="analysisContent"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 文件選擇處理
+        const originalInput = document.getElementById('originalAudio');
+        const melodyInput = document.getElementById('melodyAudio');
+        const originalLabel = document.getElementById('originalLabel');
+        const melodyLabel = document.getElementById('melodyLabel');
+
+        originalInput.addEventListener('change', function(e) {
+            if (this.files.length > 0) {
+                originalLabel.textContent = '已選擇: ' + this.files[0].name;
+                originalLabel.classList.add('has-file');
+            }
+        });
+
+        melodyInput.addEventListener('change', function(e) {
+            if (this.files.length > 0) {
+                melodyLabel.textContent = '已選擇: ' + this.files[0].name;
+                melodyLabel.classList.add('has-file');
+            }
+        });
+
+        // 表單提交處理
+        const form = document.getElementById('synthesisForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const progressSection = document.getElementById('progressSection');
+        const progressSteps = document.getElementById('progressSteps');
+        const resultSection = document.getElementById('resultSection');
+        const errorMessage = document.getElementById('errorMessage');
+
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            // 重置 UI
+            progressSection.classList.add('active');
+            resultSection.classList.remove('active');
+            errorMessage.classList.remove('active');
+            progressSteps.innerHTML = '';
+            submitBtn.disabled = true;
+            submitBtn.textContent = '處理中...';
+
+            // 準備表單數據
+            const formData = new FormData();
+            formData.append('original_audio', originalInput.files[0]);
+            formData.append('melody_audio', melodyInput.files[0]);
+            formData.append('new_lyrics', document.getElementById('newLyrics').value);
+
+            try {
+                // 發送請求
+                const response = await fetch('/api/synthesize', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // 顯示處理步驟
+                    progressSteps.innerHTML = data.steps.map(step =>
+                        `<div class="progress-step active">✓ ${step}</div>`
+                    ).join('');
+
+                    // 顯示結果
+                    setTimeout(() => {
+                        progressSection.classList.remove('active');
+                        resultSection.classList.add('active');
+
+                        // 設置音頻播放器
+                        document.getElementById('finalAudio').src = data.files.final_output;
+                        document.getElementById('vocalAudio').src = data.files.stretched_vocal;
+
+                        // 設置下載連結
+                        document.getElementById('downloadFinal').href = data.files.final_output;
+                        document.getElementById('downloadVocal').href = data.files.stretched_vocal;
+
+                        // 顯示分析結果
+                        if (data.lyrics_analysis) {
+                            const analysis = data.lyrics_analysis;
+                            let analysisHTML = '';
+
+                            if (analysis.syllable_comparison) {
+                                analysisHTML += `<p><strong>音節比較：</strong>${analysis.syllable_comparison}</p>`;
+                            }
+
+                            if (analysis.overall_recommendation) {
+                                analysisHTML += `<p><strong>整體建議：</strong>${analysis.overall_recommendation}</p>`;
+                            }
+
+                            if (analysis.rhythm_adjustments && analysis.rhythm_adjustments.length > 0) {
+                                analysisHTML += '<p><strong>節奏調整建議：</strong></p><ul>';
+                                analysis.rhythm_adjustments.forEach(adj => {
+                                    analysisHTML += `<li>${adj}</li>`;
+                                });
+                                analysisHTML += '</ul>';
+                            }
+
+                            document.getElementById('analysisContent').innerHTML = analysisHTML;
+                        }
+
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = '開始合成';
+                    }, 1000);
+
+                } else {
+                    throw new Error(data.error || '處理失敗');
+                }
+
+            } catch (error) {
+                progressSection.classList.remove('active');
+                errorMessage.textContent = '錯誤: ' + error.message;
+                errorMessage.classList.add('active');
+                submitBtn.disabled = false;
+                submitBtn.textContent = '開始合成';
+            }
+        });
+
+        // 拖放文件支持
+        [originalLabel, melodyLabel].forEach(label => {
+            label.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                label.style.background = '#f0f4ff';
+            });
+
+            label.addEventListener('dragleave', (e) => {
+                label.style.background = '';
+            });
+
+            label.addEventListener('drop', (e) => {
+                e.preventDefault();
+                label.style.background = '';
+
+                const input = document.getElementById(label.getAttribute('for'));
+                if (e.dataTransfer.files.length > 0) {
+                    input.files = e.dataTransfer.files;
+                    input.dispatchEvent(new Event('change'));
+                }
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+flask==3.0.0
+flask-cors==4.0.0
+openai>=1.55.0
+librosa>=0.10.2
+soundfile==0.12.1
+numpy>=1.26.0
+pydub==0.25.1
+scipy>=1.11.4,<1.14.0
+python-dotenv==1.0.0
+werkzeug==3.0.1
