@@ -499,6 +499,140 @@ class AudioProcessor:
 
         return notes
 
+    def detect_phrase_boundaries(self, notes, lyrics):
+        """
+        严谨地检测句子/乐句边界
+
+        使用多重判断确保准确：
+        1. 音符之间的长时间停顿
+        2. 音符强度的显著下降（句尾通常减弱）
+        3. 音高的大幅跳跃
+        4. 歌词的标点符号
+
+        Args:
+            notes: 音符列表
+            lyrics: 歌词字符串
+
+        Returns:
+            phrase_boundaries: 句子边界索引列表
+        """
+        if len(notes) < 2:
+            return [0, len(notes)]
+
+        boundaries = [0]  # 起始位置
+
+        for i in range(len(notes) - 1):
+            current_note = notes[i]
+            next_note = notes[i + 1]
+
+            # 判断标准（多重验证）
+            is_boundary = False
+            reasons = []
+
+            # 1. 检测停顿：音符间隔 > 0.3秒视为明显停顿
+            gap = next_note['start'] - current_note['end']
+            if gap > 0.3:
+                is_boundary = True
+                reasons.append(f"停顿{gap:.2f}s")
+
+            # 2. 检测强度下降：句尾通常音量减弱
+            if current_note['loudness'] > 0:
+                loudness_drop = (current_note['loudness'] - next_note['loudness']) / current_note['loudness']
+                if loudness_drop > 0.5:  # 音量下降超过50%
+                    is_boundary = True
+                    reasons.append(f"音量下降{loudness_drop*100:.0f}%")
+
+            # 3. 检测音高大跳：超过5个半音的跳跃
+            if current_note['pitch'] > 0 and next_note['pitch'] > 0:
+                pitch_jump = abs(12 * np.log2(next_note['pitch'] / current_note['pitch']))
+                if pitch_jump > 5:
+                    is_boundary = True
+                    reasons.append(f"音高跳跃{pitch_jump:.1f}半音")
+
+            # 需要至少满足一个强判断条件
+            if is_boundary:
+                boundaries.append(i + 1)
+                print(f"  检测到句子边界 #{len(boundaries)-1} 在音符 {i+1}: {', '.join(reasons)}")
+
+        boundaries.append(len(notes))  # 结束位置
+
+        # 验证：确保每个句子至少有3个音符（避免过度分割）
+        validated_boundaries = [boundaries[0]]
+        for i in range(1, len(boundaries)):
+            segment_length = boundaries[i] - validated_boundaries[-1]
+            if segment_length >= 3:  # 至少3个音符
+                validated_boundaries.append(boundaries[i])
+            else:
+                print(f"  ⚠ 跳过过短的片段（仅{segment_length}个音符）")
+
+        # 确保包含结束位置
+        if validated_boundaries[-1] != len(notes):
+            validated_boundaries.append(len(notes))
+
+        return validated_boundaries
+
+    def group_lyrics_by_phrases(self, lyrics, phrase_boundaries, notes):
+        """
+        根据句子边界将歌词分组
+
+        Args:
+            lyrics: 完整歌词
+            phrase_boundaries: 句子边界（音符索引）
+            notes: 音符列表
+
+        Returns:
+            phrases: 句子列表，每个包含 {lyrics, notes, start_time, end_time}
+        """
+        # 移除空白，只保留字符
+        chars = [c for c in lyrics if not c.isspace()]
+
+        if len(chars) == 0:
+            return []
+
+        phrases = []
+
+        for i in range(len(phrase_boundaries) - 1):
+            start_idx = phrase_boundaries[i]
+            end_idx = phrase_boundaries[i + 1]
+
+            phrase_notes = notes[start_idx:end_idx]
+
+            if len(phrase_notes) == 0:
+                continue
+
+            # 计算这个句子应该对应多少个字
+            # 按音符数量比例分配字符
+            total_notes = len(notes)
+            phrase_note_count = len(phrase_notes)
+
+            # 计算字符范围
+            char_start = int(len(chars) * start_idx / total_notes)
+            char_end = int(len(chars) * end_idx / total_notes)
+
+            # 确保不越界
+            char_start = min(char_start, len(chars) - 1)
+            char_end = min(char_end, len(chars))
+
+            phrase_chars = chars[char_start:char_end]
+            phrase_lyrics = ''.join(phrase_chars)
+
+            if len(phrase_lyrics) == 0:
+                continue
+
+            phrase = {
+                'lyrics': phrase_lyrics,
+                'notes': phrase_notes,
+                'start_time': phrase_notes[0]['start'],
+                'end_time': phrase_notes[-1]['end'],
+                'duration': phrase_notes[-1]['end'] - phrase_notes[0]['start'],
+                'note_count': len(phrase_notes),
+                'char_count': len(phrase_lyrics)
+            }
+
+            phrases.append(phrase)
+
+        return phrases
+
     def align_lyrics_to_notes(self, lyrics, notes):
         """
         將歌詞對齊到音符
