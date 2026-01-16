@@ -90,9 +90,24 @@ class VocalSynthesizer:
             notes = self.audio_processor.extract_note_level_features(melody_path)
             print(f"  檢測到 {len(notes)} 個音符")
 
+            # Step 7.5: 分析音域並自動調整
+            result['steps'].append('正在分析音域並匹配女聲...')
+            print("\nStep 7.5: 音域分析")
+
+            vocal_range = self.audio_processor.analyze_vocal_range(notes)
+
+            # 如果是男聲，自動升高所有音符的音高
+            if vocal_range['pitch_shift'] > 0:
+                print(f"  正在將所有音符升高 {vocal_range['pitch_shift']} 半音...")
+                for note in notes:
+                    if note['pitch'] > 0:
+                        # 升高音高（頻率翻倍 = 升高12半音）
+                        note['pitch'] = note['pitch'] * (2 ** (vocal_range['pitch_shift'] / 12))
+                print(f"  ✓ 音高調整完成: {vocal_range['median_pitch']:.1f}Hz → {vocal_range['median_pitch'] * 2:.1f}Hz")
+
             # Step 8: 嚴謹分割句子
             result['steps'].append('正在嚴謹分析句子邊界...')
-            print("Step 8: 檢測句子邊界")
+            print("\nStep 8: 檢測句子邊界")
 
             # 使用多重判斷檢測句子邊界
             phrase_boundaries = self.audio_processor.detect_phrase_boundaries(notes, new_lyrics)
@@ -122,29 +137,45 @@ class VocalSynthesizer:
 
                 print(f"\n  ===== 處理句子 {phrase_idx + 1}/{len(phrases)}: '{phrase_lyrics}' =====")
 
-                # 10.1: 為整個句子生成 TTS（保持連貫性）
+                # 10.1: 計算合適的TTS速度，減少後續時間拉伸
+                # 估算正常朗讀時長：每個字約 0.3-0.4 秒
+                estimated_duration = len(phrase_lyrics) * 0.35
+                target_duration = phrase['duration']
+
+                # 計算TTS速度：讓生成的時長接近目標時長
+                tts_speed = estimated_duration / target_duration
+                # 限制速度範圍，避免太極端
+                tts_speed = np.clip(tts_speed, 0.5, 2.0)
+
+                print(f"    目標時長: {target_duration:.2f}s, TTS速度: {tts_speed:.2f}x")
+
+                # 10.2: 為整個句子生成 TTS（保持連貫性）
                 phrase_tts_path = os.path.join(output_dir, f'phrase_{phrase_idx}.wav')
 
                 self.ai_service.generate_speech_with_timing(
                     phrase_lyrics,
                     phrase_tts_path,
                     voice=Config.TTS_VOICE,  # 女聲 shimmer
-                    speed=1.0  # 正常速度
+                    speed=tts_speed  # 使用計算的速度
                 )
 
-                # 10.2: 加載句子音頻
+                # 10.3: 加載句子音頻
                 phrase_audio, phrase_sr = self.audio_processor.load_audio(phrase_tts_path)
 
-                # 10.3: 調整時長以匹配句子的總時長
+                # 10.4: 微調時長（現在拉伸倍數應該很小）
                 phrase_duration = librosa.get_duration(y=phrase_audio, sr=phrase_sr)
-                target_duration = phrase['duration']
 
                 if phrase_duration > 0:
                     stretch_factor = phrase_duration / target_duration
-                    phrase_audio = self.audio_processor.time_stretch_audio(phrase_audio, stretch_factor)
-                    print(f"    時長調整: {phrase_duration:.2f}s → {target_duration:.2f}s (拉伸係數: {stretch_factor:.2f})")
 
-                # 10.4: 提取句子TTS的音高軌跡
+                    # 只在必要時拉伸（避免過度拉伸導致音質下降）
+                    if abs(stretch_factor - 1.0) > 0.05:  # 差異超過5%才拉伸
+                        phrase_audio = self.audio_processor.time_stretch_audio(phrase_audio, stretch_factor)
+                        print(f"    時長微調: {phrase_duration:.2f}s → {target_duration:.2f}s (拉伸係數: {stretch_factor:.2f})")
+                    else:
+                        print(f"    時長已接近目標，無需拉伸 ({phrase_duration:.2f}s ≈ {target_duration:.2f}s)")
+
+                # 10.5: 提取句子TTS的音高軌跡
                 phrase_f0, voiced_flag, voiced_probs = librosa.pyin(
                     phrase_audio,
                     fmin=librosa.note_to_hz('C2'),
@@ -152,7 +183,7 @@ class VocalSynthesizer:
                     sr=phrase_sr
                 )
 
-                # 10.5: 提取目標音高軌跡（從音符列表）
+                # 10.6: 提取目標音高軌跡（從音符列表）
                 target_f0 = []
                 for note in phrase_notes:
                     note_frames = int(note['duration'] * phrase_sr / 512)  # hop_length=512
@@ -171,7 +202,7 @@ class VocalSynthesizer:
                     f = interp1d(old_x, target_f0, kind='linear', fill_value='extrapolate')
                     target_f0 = f(new_x)
 
-                # 10.6: 精確調整音高以匹配原唱
+                # 10.7: 精確調整音高以匹配原唱
                 try:
                     phrase_audio = self.audio_processor.apply_dynamic_pitch_contour(
                         phrase_audio,
@@ -182,7 +213,7 @@ class VocalSynthesizer:
                 except Exception as e:
                     print(f"    ⚠ 音高調整失敗: {e}")
 
-                # 10.7: 調整音量包絡以匹配原唱的強度變化
+                # 10.8: 調整音量包絡以匹配原唱的強度變化
                 try:
                     # 構建目標RMS
                     target_rms = []
@@ -199,7 +230,7 @@ class VocalSynthesizer:
                 except Exception as e:
                     print(f"    ⚠ 音量調整失敗: {e}")
 
-                # 10.8: 確保音頻長度精確
+                # 10.9: 確保音頻長度精確
                 target_samples = int(target_duration * phrase_sr)
                 if len(phrase_audio) > target_samples:
                     phrase_audio = phrase_audio[:target_samples]

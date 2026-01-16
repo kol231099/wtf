@@ -392,6 +392,62 @@ class AudioProcessor:
 
         return shaped_audio
 
+    def analyze_vocal_range(self, notes):
+        """
+        分析音符的音域范围，判断是男声还是女声
+
+        Args:
+            notes: 音符列表
+
+        Returns:
+            dict: {
+                'median_pitch': 中位数音高 (Hz),
+                'is_female': 是否为女声,
+                'pitch_shift': 建议的音高调整（半音数）
+            }
+        """
+        if len(notes) == 0:
+            return {'median_pitch': 200, 'is_female': True, 'pitch_shift': 0}
+
+        # 提取所有有效音高
+        pitches = [n['pitch'] for n in notes if n['pitch'] > 0]
+        if len(pitches) == 0:
+            return {'median_pitch': 200, 'is_female': True, 'pitch_shift': 0}
+
+        median_pitch = np.median(pitches)
+        mean_pitch = np.mean(pitches)
+
+        # 音域判断标准：
+        # 女声通常: 200-400 Hz (G3-G4)
+        # 男声通常: 100-200 Hz (G2-G3)
+
+        print(f"\n  === 音域分析 ===")
+        print(f"  中位数音高: {median_pitch:.1f} Hz")
+        print(f"  平均音高: {mean_pitch:.1f} Hz")
+        print(f"  音高范围: {min(pitches):.1f} - {max(pitches):.1f} Hz")
+
+        # 判断是否为女声
+        is_female = median_pitch >= 180  # 180Hz ≈ F#3
+
+        if is_female:
+            print(f"  ✓ 判断为女声音域，无需调整")
+            pitch_shift = 0
+        else:
+            # 男声 → 女声：升高一个八度（+12半音）
+            pitch_shift = 12
+            target_pitch = median_pitch * 2  # 升高一个八度
+            print(f"  ⚠ 判断为男声音域")
+            print(f"  → 将自动升高一个八度: {median_pitch:.1f}Hz → {target_pitch:.1f}Hz (+12半音)")
+
+        return {
+            'median_pitch': median_pitch,
+            'mean_pitch': mean_pitch,
+            'is_female': is_female,
+            'pitch_shift': pitch_shift,
+            'min_pitch': min(pitches),
+            'max_pitch': max(pitches)
+        }
+
     def extract_note_level_features(self, audio_path):
         """
         提取音符級別的詳細特徵（用於逐字匹配）
